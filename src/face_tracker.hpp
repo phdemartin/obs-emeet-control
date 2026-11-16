@@ -61,9 +61,9 @@ public:
         }
         frame_idx_++;
 
-        const float smooth = static_cast<float>(std::clamp(smoothing, 0.02, 0.35));
-        constexpr float deadzone = 0.04f;
-        constexpr float max_step = 0.015f;
+        const float smooth = static_cast<float>(std::clamp(smoothing, 0.05, 0.45));
+        constexpr float deadzone = 0.025f;
+        constexpr float max_step = 0.035f;
 
         if (has_target_) {
             face_h_ratio_ = face_h_ratio_ * 0.85f + target_fh_ * 0.15f;
@@ -76,7 +76,7 @@ public:
         }
 
         const float z = static_cast<float>(std::clamp(zoom_factor, 1.05, 3.5));
-        int min_crop_h = static_cast<int>(h * std::min(1.0f, face_h_ratio_ * 2.8f));
+        int min_crop_h = static_cast<int>(h * std::min(1.0f, face_h_ratio_ * 1.85f));
         int desired_crop_h = static_cast<int>(h / z);
         int crop_h = std::max(desired_crop_h, min_crop_h) & ~1;
         crop_h = std::clamp(crop_h, 120, h);

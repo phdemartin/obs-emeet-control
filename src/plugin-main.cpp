@@ -278,8 +278,8 @@ void emeet_get_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, "hw_powerline", 1);
 
     obs_data_set_default_bool(settings, "face_tracking", false);
-    obs_data_set_default_double(settings, "track_zoom", 1.5);
-    obs_data_set_default_double(settings, "track_smooth", 0.08);
+    obs_data_set_default_double(settings, "track_zoom", 1.6);
+    obs_data_set_default_double(settings, "track_smooth", 0.16);
     obs_data_set_default_int(settings, "hdr_mode", 0);
     obs_data_set_default_bool(settings, "lut_enabled", false);
     std::string def_lut_dir;
