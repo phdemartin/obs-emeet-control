@@ -4,7 +4,9 @@
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -182,7 +184,9 @@ void emeet_update(void *data, obs_data_t *settings)
 
     ctx->hdr_mode = static_cast<emeet::HdrMode>(obs_data_get_int(settings, "hdr_mode"));
     ctx->lut_enabled = obs_data_get_bool(settings, "lut_enabled");
-    const char *lut_c = obs_data_get_string(settings, "lut_path");
+    const char *lut_c = obs_data_get_string(settings, "lut_file");
+    if (!lut_c || !lut_c[0])
+        lut_c = obs_data_get_string(settings, "lut_path");
     ctx->lut_path = lut_c ? lut_c : "";
     if (ctx->lut_enabled && !ctx->lut_path.empty())
         ctx->lut.load(ctx->lut_path);
@@ -278,9 +282,102 @@ void emeet_get_defaults(obs_data_t *settings)
     obs_data_set_default_double(settings, "track_smooth", 0.08);
     obs_data_set_default_int(settings, "hdr_mode", 0);
     obs_data_set_default_bool(settings, "lut_enabled", false);
+    std::string def_lut_dir;
+    if (const char *home = std::getenv("HOME")) {
+        std::filesystem::path p1 = std::filesystem::path(home) / ".config" / "LUTs";
+        std::filesystem::path p2 = std::filesystem::path(home) / ".config" / "obs-studio" / "LUTs";
+        if (std::filesystem::is_directory(p1))
+            def_lut_dir = p1.string();
+        else if (std::filesystem::is_directory(p2))
+            def_lut_dir = p2.string();
+    }
+    obs_data_set_default_string(settings, "lut_dir", def_lut_dir.c_str());
+    obs_data_set_default_string(settings, "lut_file", "");
     obs_data_set_default_string(settings, "lut_path", "");
     obs_data_set_default_bool(settings, "flip_h", false);
     obs_data_set_default_bool(settings, "flip_v", false);
+}
+
+std::vector<std::filesystem::path> scan_lut_dir(const std::string &dir_str)
+{
+    std::vector<std::filesystem::path> out;
+    if (dir_str.empty())
+        return out;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir_str, ec))
+        return out;
+    for (const auto &entry : std::filesystem::directory_iterator(dir_str, ec)) {
+        if (!entry.is_regular_file(ec))
+            continue;
+        std::string ext = entry.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext == ".png" || ext == ".cube")
+            out.push_back(entry.path());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+void populate_lut_list(obs_property_t *list, const std::string &dir_str)
+{
+    obs_property_list_clear(list);
+    obs_property_list_add_string(list, "(None)", "");
+    for (const auto &p : scan_lut_dir(dir_str)) {
+        obs_property_list_add_string(list, p.stem().string().c_str(), p.string().c_str());
+    }
+}
+
+bool on_lut_dir_changed(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+    obs_property_t *list = obs_properties_get(props, "lut_file");
+    if (!list)
+        return false;
+    const char *dir_c = obs_data_get_string(settings, "lut_dir");
+    populate_lut_list(list, dir_c ? dir_c : "");
+    return true;
+}
+
+bool step_lut(void *data, int delta)
+{
+    auto *ctx = static_cast<EmeetFilterContext *>(data);
+    obs_data_t *settings = obs_source_get_settings(ctx->source);
+    if (!settings)
+        return false;
+
+    const char *dir_c = obs_data_get_string(settings, "lut_dir");
+    auto files = scan_lut_dir(dir_c ? dir_c : "");
+    if (files.empty()) {
+        obs_data_release(settings);
+        return false;
+    }
+
+    const char *cur_c = obs_data_get_string(settings, "lut_file");
+    std::string cur = cur_c ? cur_c : "";
+    int idx = -1;
+    for (int i = 0; i < static_cast<int>(files.size()); ++i) {
+        if (files[i].string() == cur) {
+            idx = i;
+            break;
+        }
+    }
+    int n = static_cast<int>(files.size());
+    int next_idx = (idx < 0) ? (delta > 0 ? 0 : n - 1) : ((idx + delta + n) % n);
+
+    obs_data_set_string(settings, "lut_file", files[next_idx].string().c_str());
+    obs_data_set_bool(settings, "lut_enabled", true);
+    emeet_update(ctx, settings);
+    obs_data_release(settings);
+    return true;
+}
+
+bool on_lut_prev_clicked(obs_properties_t *, obs_property_t *, void *data)
+{
+    return step_lut(data, -1);
+}
+
+bool on_lut_next_clicked(obs_properties_t *, obs_property_t *, void *data)
+{
+    return step_lut(data, 1);
 }
 
 bool on_reset_hw_clicked(obs_properties_t *, obs_property_t *, void *data)
@@ -370,10 +467,24 @@ obs_properties_t *emeet_get_properties(void *data)
     obs_property_list_add_int(hdr_list, "Balanced", 1);
     obs_property_list_add_int(hdr_list, "Strong", 2);
 
-    obs_properties_add_bool(sw_group, "lut_enabled", "Enable 3D LUT (.png / .cube)");
-    obs_properties_add_path(
-        sw_group, "lut_path", "LUT File",
-        OBS_PATH_FILE, "LUT Files (*.png *.cube);;All Files (*.*)", nullptr);
+    obs_properties_add_bool(sw_group, "lut_enabled", "Enable 3D LUT (On / Off)");
+    obs_property_t *lut_dir_prop = obs_properties_add_path(
+        sw_group, "lut_dir", "LUT Folder",
+        OBS_PATH_DIRECTORY, nullptr, nullptr);
+    obs_property_set_modified_callback(lut_dir_prop, on_lut_dir_changed);
+
+    obs_property_t *lut_list = obs_properties_add_list(
+        sw_group, "lut_file", "Select LUT",
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+    {
+        obs_data_t *cur_settings = obs_source_get_settings(ctx->source);
+        const char *dir_c = cur_settings ? obs_data_get_string(cur_settings, "lut_dir") : "";
+        populate_lut_list(lut_list, dir_c ? dir_c : "");
+        if (cur_settings)
+            obs_data_release(cur_settings);
+    }
+    obs_properties_add_button(sw_group, "lut_prev", "◀ Previous LUT", on_lut_prev_clicked);
+    obs_properties_add_button(sw_group, "lut_next", "Next LUT ▶", on_lut_next_clicked);
 
     obs_properties_add_bool(sw_group, "flip_h", "Flip Horizontal (Mirror)");
     obs_properties_add_bool(sw_group, "flip_v", "Flip Vertical");
