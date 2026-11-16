@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="1.0.0"
+VERSION="1.0.1"
 PKG="obs-emeet-control"
 STAGE="$REPO_DIR/dist/deb_stage"
 OUT_DEB="$REPO_DIR/dist/${PKG}_${VERSION}_amd64.deb"

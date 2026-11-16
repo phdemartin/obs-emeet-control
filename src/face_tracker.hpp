@@ -40,6 +40,7 @@ public:
         has_pos_ = false;
         has_target_ = false;
         face_h_ratio_ = 0.25f;
+        smooth_crop_h_ = -1.0f;
         frame_idx_ = 0;
     }
 
@@ -61,12 +62,12 @@ public:
         }
         frame_idx_++;
 
-        const float smooth = static_cast<float>(std::clamp(smoothing, 0.05, 0.45));
-        constexpr float deadzone = 0.025f;
-        constexpr float max_step = 0.035f;
+        const float smooth = static_cast<float>(std::clamp(smoothing, 0.03, 0.35));
+        constexpr float deadzone = 0.03f;
+        constexpr float max_step = 0.020f;
 
         if (has_target_) {
-            face_h_ratio_ = face_h_ratio_ * 0.85f + target_fh_ * 0.15f;
+            face_h_ratio_ = face_h_ratio_ * 0.97f + target_fh_ * 0.03f;
             float dx = target_x_ - cx_;
             float dy = target_y_ - cy_;
             if (std::abs(dx) > deadzone)
@@ -76,9 +77,15 @@ public:
         }
 
         const float z = static_cast<float>(std::clamp(zoom_factor, 1.05, 3.5));
-        int min_crop_h = static_cast<int>(h * std::min(1.0f, face_h_ratio_ * 1.85f));
-        int desired_crop_h = static_cast<int>(h / z);
-        int crop_h = std::max(desired_crop_h, min_crop_h) & ~1;
+        float min_crop_h = h * std::min(1.0f, face_h_ratio_ * 1.85f);
+        float desired_crop_h = h / z;
+        float target_crop_h = std::max(desired_crop_h, min_crop_h);
+        if (smooth_crop_h_ < 0.0f) {
+            smooth_crop_h_ = target_crop_h;
+        } else if (std::abs(target_crop_h - smooth_crop_h_) > h * 0.025f) {
+            smooth_crop_h_ += (target_crop_h - smooth_crop_h_) * 0.08f;
+        }
+        int crop_h = static_cast<int>(smooth_crop_h_) & ~1;
         crop_h = std::clamp(crop_h, 120, h);
 
         int crop_w = static_cast<int>(crop_h * (static_cast<float>(w) / h)) & ~1;
@@ -114,7 +121,14 @@ private:
         std::vector<cv::Rect> faces;
         front_cascade_.detectMultiScale(gray, faces, 1.12, 5, 0, cv::Size(min_sz, min_sz));
         if (faces.empty() && !profile_cascade_.empty()) {
-            profile_cascade_.detectMultiScale(gray, faces, 1.15, 5, 0, cv::Size(min_sz, min_sz));
+            profile_cascade_.detectMultiScale(gray, faces, 1.15, 4, 0, cv::Size(min_sz, min_sz));
+            if (faces.empty()) {
+                cv::Mat flipped;
+                cv::flip(gray, flipped, 1);
+                profile_cascade_.detectMultiScale(flipped, faces, 1.15, 4, 0, cv::Size(min_sz, min_sz));
+                for (auto &f : faces)
+                    f.x = gray.cols - f.x - f.width;
+            }
         }
         if (faces.empty())
             return;
@@ -139,6 +153,7 @@ private:
     float target_y_ = 0.45f;
     float target_fh_ = 0.25f;
     float face_h_ratio_ = 0.25f;
+    float smooth_crop_h_ = -1.0f;
     int frame_idx_ = 0;
 };
 
