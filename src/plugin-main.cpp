@@ -1,6 +1,7 @@
 #include <obs/obs-module.h>
 #include <obs/obs.h>
 
+#include <opencv2/core/utility.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
@@ -45,11 +46,13 @@ struct EmeetFilterContext {
     emeet::FaceTracker tracker;
     emeet::Lut3D lut;
 
-    // Persistent output frame
+    // Persistent output frame and scratch Mats (avoid per-frame heap/TBB churn)
     struct obs_source_frame out_frame {};
     uint32_t out_w = 0;
     uint32_t out_h = 0;
     bool out_init = false;
+    cv::Mat work_yuv;
+    cv::Mat work_bgr;
 };
 
 void ensure_out_frame(EmeetFilterContext *ctx, uint32_t w, uint32_t h)
@@ -66,7 +69,7 @@ void ensure_out_frame(EmeetFilterContext *ctx, uint32_t w, uint32_t h)
     ctx->out_init = true;
 }
 
-bool frame_to_bgr(const struct obs_source_frame *frame, cv::Mat &bgr)
+bool frame_to_bgr(const struct obs_source_frame *frame, cv::Mat &bgr, cv::Mat &yuv_scratch)
 {
     const int w = static_cast<int>(frame->width);
     const int h = static_cast<int>(frame->height);
@@ -89,14 +92,8 @@ bool frame_to_bgr(const struct obs_source_frame *frame, cv::Mat &bgr)
         return true;
     }
     case VIDEO_FORMAT_I420: {
-        cv::Mat yuv(h + h / 2, w, CV_8UC1);
-        for (int r = 0; r < h; ++r)
-            std::memcpy(yuv.ptr(r), frame->data[0] + r * frame->linesize[0], w);
-        for (int r = 0; r < h / 2; ++r) {
-            std::memcpy(yuv.ptr(h + r / 2) + (r % 2) * (w / 2), frame->data[1] + r * frame->linesize[1], w / 2);
-        }
-        // Better: copy planar I420 contiguous
-        uint8_t *dst = yuv.data;
+        yuv_scratch.create(h + h / 2, w, CV_8UC1);
+        uint8_t *dst = yuv_scratch.data;
         for (int r = 0; r < h; ++r) {
             std::memcpy(dst, frame->data[0] + r * frame->linesize[0], w);
             dst += w;
@@ -109,7 +106,7 @@ bool frame_to_bgr(const struct obs_source_frame *frame, cv::Mat &bgr)
             std::memcpy(dst, frame->data[2] + r * frame->linesize[2], w / 2);
             dst += w / 2;
         }
-        cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_I420);
+        cv::cvtColor(yuv_scratch, bgr, cv::COLOR_YUV2BGR_I420);
         return true;
     }
     case VIDEO_FORMAT_BGRA:
@@ -511,8 +508,8 @@ struct obs_source_frame *emeet_filter_video(void *data, struct obs_source_frame 
     if (!need_sw)
         return frame;
 
-    cv::Mat bgr;
-    if (!frame_to_bgr(frame, bgr))
+    cv::Mat &bgr = ctx->work_bgr;
+    if (!frame_to_bgr(frame, bgr, ctx->work_yuv))
         return frame;
 
     if (ctx->flip_h || ctx->flip_v) {
@@ -554,6 +551,8 @@ struct obs_source_info emeet_filter_info = {
 
 bool obs_module_load(void)
 {
+    // Prevent OpenCV/TBB from spawning 32+ worker threads & arenas inside OBS's graphics thread
+    cv::setNumThreads(1);
     obs_register_source(&emeet_filter_info);
     return true;
 }
