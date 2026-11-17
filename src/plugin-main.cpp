@@ -46,28 +46,10 @@ struct EmeetFilterContext {
     emeet::FaceTracker tracker;
     emeet::Lut3D lut;
 
-    // Persistent output frame and scratch Mats (avoid per-frame heap/TBB churn)
-    struct obs_source_frame out_frame {};
-    uint32_t out_w = 0;
-    uint32_t out_h = 0;
-    bool out_init = false;
+    // Persistent scratch Mats (avoid per-frame heap/TBB churn)
     cv::Mat work_yuv;
     cv::Mat work_bgr;
 };
-
-void ensure_out_frame(EmeetFilterContext *ctx, uint32_t w, uint32_t h)
-{
-    if (ctx->out_init && ctx->out_w == w && ctx->out_h == h)
-        return;
-    if (ctx->out_init)
-        obs_source_frame_free(&ctx->out_frame);
-    std::memset(&ctx->out_frame, 0, sizeof(ctx->out_frame));
-    obs_source_frame_init(&ctx->out_frame, VIDEO_FORMAT_BGRA, w, h);
-    ctx->out_frame.full_range = true;
-    ctx->out_w = w;
-    ctx->out_h = h;
-    ctx->out_init = true;
-}
 
 bool frame_to_bgr(const struct obs_source_frame *frame, cv::Mat &bgr, cv::Mat &yuv_scratch)
 {
@@ -122,6 +104,94 @@ bool frame_to_bgr(const struct obs_source_frame *frame, cv::Mat &bgr, cv::Mat &y
     }
     default:
         return false;
+    }
+}
+
+void bgr_to_frame(const cv::Mat &bgr, struct obs_source_frame *frame, cv::Mat &yuv_scratch)
+{
+    const int w = bgr.cols;
+    const int h = bgr.rows;
+
+    switch (frame->format) {
+    case VIDEO_FORMAT_BGRA:
+    case VIDEO_FORMAT_BGRX: {
+        cv::Mat dst(h, w, CV_8UC4, frame->data[0], frame->linesize[0]);
+        cv::cvtColor(bgr, dst, cv::COLOR_BGR2BGRA);
+        break;
+    }
+    case VIDEO_FORMAT_RGBA: {
+        cv::Mat dst(h, w, CV_8UC4, frame->data[0], frame->linesize[0]);
+        cv::cvtColor(bgr, dst, cv::COLOR_BGR2RGBA);
+        break;
+    }
+    case VIDEO_FORMAT_I420: {
+        cv::cvtColor(bgr, yuv_scratch, cv::COLOR_BGR2YUV_I420);
+        const uint8_t *src = yuv_scratch.data;
+        for (int r = 0; r < h; ++r) {
+            std::memcpy(frame->data[0] + r * frame->linesize[0], src, w);
+            src += w;
+        }
+        for (int r = 0; r < h / 2; ++r) {
+            std::memcpy(frame->data[1] + r * frame->linesize[1], src, w / 2);
+            src += w / 2;
+        }
+        for (int r = 0; r < h / 2; ++r) {
+            std::memcpy(frame->data[2] + r * frame->linesize[2], src, w / 2);
+            src += w / 2;
+        }
+        break;
+    }
+    case VIDEO_FORMAT_NV12: {
+        cv::cvtColor(bgr, yuv_scratch, cv::COLOR_BGR2YUV_I420);
+        const uint8_t *src_y = yuv_scratch.data;
+        const uint8_t *src_u = src_y + w * h;
+        const uint8_t *src_v = src_u + (w / 2) * (h / 2);
+        for (int r = 0; r < h; ++r) {
+            std::memcpy(frame->data[0] + r * frame->linesize[0], src_y + r * w, w);
+        }
+        for (int r = 0; r < h / 2; ++r) {
+            uint8_t *dst_uv = frame->data[1] + r * frame->linesize[1];
+            const uint8_t *u_row = src_u + r * (w / 2);
+            const uint8_t *v_row = src_v + r * (w / 2);
+            for (int c = 0; c < w / 2; ++c) {
+                dst_uv[c * 2] = u_row[c];
+                dst_uv[c * 2 + 1] = v_row[c];
+            }
+        }
+        break;
+    }
+    case VIDEO_FORMAT_YUY2:
+    case VIDEO_FORMAT_UYVY: {
+        cv::cvtColor(bgr, yuv_scratch, cv::COLOR_BGR2YUV_I420);
+        const uint8_t *src_y = yuv_scratch.data;
+        const uint8_t *src_u = src_y + w * h;
+        const uint8_t *src_v = src_u + (w / 2) * (h / 2);
+        const bool is_yuy2 = (frame->format == VIDEO_FORMAT_YUY2);
+        for (int r = 0; r < h; ++r) {
+            uint8_t *dst = frame->data[0] + r * frame->linesize[0];
+            const uint8_t *y_row = src_y + r * w;
+            const uint8_t *u_row = src_u + (r / 2) * (w / 2);
+            const uint8_t *v_row = src_v + (r / 2) * (w / 2);
+            for (int c = 0; c < w; c += 2) {
+                const uint8_t u = u_row[c / 2];
+                const uint8_t v = v_row[c / 2];
+                if (is_yuy2) {
+                    dst[c * 2 + 0] = y_row[c];
+                    dst[c * 2 + 1] = u;
+                    dst[c * 2 + 2] = y_row[c + 1];
+                    dst[c * 2 + 3] = v;
+                } else {
+                    dst[c * 2 + 0] = u;
+                    dst[c * 2 + 1] = y_row[c];
+                    dst[c * 2 + 2] = v;
+                    dst[c * 2 + 3] = y_row[c + 1];
+                }
+            }
+        }
+        break;
+    }
+    default:
+        break;
     }
 }
 
@@ -252,8 +322,6 @@ void *emeet_create(obs_data_t *settings, obs_source_t *source)
 void emeet_destroy(void *data)
 {
     auto *ctx = static_cast<EmeetFilterContext *>(data);
-    if (ctx->out_init)
-        obs_source_frame_free(&ctx->out_frame);
     delete ctx;
 }
 
@@ -526,12 +594,8 @@ struct obs_source_frame *emeet_filter_video(void *data, struct obs_source_frame 
     if (need_lut)
         ctx->lut.apply(bgr);
 
-    ensure_out_frame(ctx, static_cast<uint32_t>(bgr.cols), static_cast<uint32_t>(bgr.rows));
-    cv::Mat out_bgra(bgr.rows, bgr.cols, CV_8UC4, ctx->out_frame.data[0], ctx->out_frame.linesize[0]);
-    cv::cvtColor(bgr, out_bgra, cv::COLOR_BGR2BGRA);
-
-    ctx->out_frame.timestamp = frame->timestamp;
-    return &ctx->out_frame;
+    bgr_to_frame(bgr, frame, ctx->work_yuv);
+    return frame;
 }
 
 struct obs_source_info emeet_filter_info = {
